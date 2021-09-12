@@ -14,14 +14,19 @@
 
 using namespace std;
 
-atomic<bool> stop (false);
+const int MAX_CONN = 1024;
 
-int _socket, server;
+atomic<bool> stop (false);
+atomic<int> n_errors (1);
+
+int _socket;
+vector<int> clients;
 int bufsize = 1024;
 int port = 5555;
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t have_new_messages = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t message_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t flush_messages = PTHREAD_COND_INITIALIZER;
 vector<string> message_queue = {};
 
 
@@ -36,18 +41,25 @@ void *readKeypress(void*) {
     }
     cout << "stopping" << endl;
     stop = true;
-    shutdown(server, SHUT_RD);
-    close(server);
+    pthread_cond_signal(&flush_messages);
+    for (int i = 0; i < clients.size(); i++) {
+        shutdown(clients[i], SHUT_RDWR);
+        close(clients[i]);
+    }
+    shutdown(_socket, SHUT_RDWR);
     close(_socket);
     pthread_exit(NULL);
 }
 
 void startServer() {
+
     _socket = socket(AF_INET, SOCK_STREAM, 0);
+
     if (_socket < 0) {
         cout << "Error: can't open a socket" << endl;
         exit(1);
     }
+
     struct sockaddr_in server_addr;
 
     server_addr.sin_family = AF_INET;
@@ -59,34 +71,10 @@ void startServer() {
         exit(1);
     }
 
+    listen(_socket, MAX_CONN);
+
     cout << "Waiting for clients to connect..." << endl;
 
-    listen(_socket, 1);
-
-    struct sockaddr_in client_addr;
-    socklen_t size = sizeof(client_addr);
-
-    server = accept(_socket, (struct sockaddr *)&client_addr, &size);
-
-    if (server < 0) {
-        cout << "Error: can't accept connections" << endl;
-        exit(1);
-    }
-
-    cout << "Connected client IP address: " << inet_ntoa(client_addr.sin_addr) << endl;
-}
-
-void sendMessage(char const* msg) {
-    if (stop) {
-        return;
-    }
-    char* buf = new char[strlen(msg) + 2];
-    buf[0] = '\x02';
-    for (int i = 0; i < strlen(msg) + 1; i++) {
-        buf[i+1] = msg[i];
-    }
-    buf[strlen(msg)+1] = '\x03';
-    send(server, buf, strlen(buf), 0);
 }
 
 bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n, bool start) {
@@ -104,53 +92,116 @@ bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n, bool start) {
     return finished;
 }
 
-void *serverRecv(void*) {
-    int e = 0;
+void *serverRecv(void *client) {
+
+    int _client = *((int *)client);
+
     while (!stop) {
+
         vector<string> messages;
         char buffer[bufsize];
-        ssize_t n = recv(server, buffer, bufsize, 0);
+        ssize_t n = recv(_client, buffer, bufsize, 0);
+
         if (n == 0) {
             continue;
         }
         if (n < 1) {
-            e += 1;
+            n_errors += 1;
             continue;
         }
         bool finished = appendBuffer(messages, buffer, n, true);
         while (!finished && n > 0 && !stop) {
-            n = recv(server, buffer, bufsize, 0);
+            n = recv(_client, buffer, bufsize, 0);
             finished = appendBuffer(messages, buffer, n, false);
         }
 
         if (messages.size() > 0) {
 
-            pthread_mutex_lock(&mutex);
+            pthread_mutex_lock(&message_mutex);
             for (int i = 0; i < messages.size(); i++) {
                 message_queue.push_back(messages[i]);
             }
-            pthread_mutex_unlock(&mutex);
-            pthread_cond_signal(&have_new_messages);
+            pthread_mutex_unlock(&message_mutex);
+            pthread_cond_signal(&flush_messages);
 
         }
 
     }
-    cout << "n errors: " << e << endl;
-    pthread_cond_signal(&have_new_messages);
+
     pthread_exit(NULL);
+
+}
+
+void *listenNewConnections(void*) {
+
+    vector<pthread_t> recv_threads;
+
+    while (!stop) {
+
+        struct sockaddr_in client_addr;
+        socklen_t size = sizeof(client_addr);
+
+        int client = accept(_socket, (struct sockaddr *)&client_addr, &size);
+
+        if (client < 0 && stop) {
+            break;
+        }
+
+        if (client < 0) {
+            cout << "Error: can't accept connections" << endl;
+            exit(1);
+        }
+
+        pthread_mutex_lock(&client_mutex);
+        clients.push_back(client);
+        pthread_mutex_unlock(&client_mutex);
+
+        cout << "Connected client IP address: " << inet_ntoa(client_addr.sin_addr) << endl;
+
+        pthread_t recv_thread;
+        int r = pthread_create(&recv_thread, NULL, &serverRecv, &client);
+        if (r) {
+            cout << endl << "Error: failed to connect a client" << endl;
+            exit(1);
+        }
+
+        recv_threads.push_back(recv_thread);
+
+    }
+
+    for (int i = 0; i < recv_threads.size(); i++) {
+        pthread_join(recv_threads[i], NULL);
+    }
+
+    pthread_exit(NULL);
+}
+
+void sendMessage(char const* msg) {
+    if (stop) {
+        return;
+    }
+    char* buf = new char[strlen(msg) + 2];
+    buf[0] = '\x02';
+    for (int i = 0; i < strlen(msg) + 1; i++) {
+        buf[i+1] = msg[i];
+    }
+    buf[strlen(msg)+1] = '\x03';
+    for (int i = 0; i < clients.size(); i++) {
+        send(clients[i], buf, strlen(buf), 0);
+    }
 }
 
 void *serverSend(void*) {
     int n;
     while (!stop) {
         vector<string> messages;
-        pthread_cond_wait(&have_new_messages, &mutex);
+        pthread_cond_wait(&flush_messages, &message_mutex);
         n = message_queue.size();
         for (int i = 0; i < n; i++) {
             messages.push_back(message_queue[i]);
         }
         message_queue.clear();
-        pthread_mutex_unlock(&mutex);
+        pthread_mutex_unlock(&message_mutex);
         for (int i = 0; i < n; i++) {
             sendMessage(messages[i].c_str());
         }
@@ -158,23 +209,24 @@ void *serverSend(void*) {
     pthread_exit(NULL);
 }
 
-
 int main() {
 
     startServer();
 
-    pthread_t server_recv_thread, server_send_thread, keypress_thread;
-    int r1 = pthread_create(&server_recv_thread, NULL, &serverRecv, NULL);
+    pthread_t listen_thread, server_send_thread, keypress_thread;
+    int r1 = pthread_create(&listen_thread, NULL, &listenNewConnections, NULL);
     int r2 = pthread_create(&server_send_thread, NULL, &serverSend, NULL);
     if (r1 || r2) {
-        cout << endl << "Error: failed to create a thread" << endl;
+        cout << endl << "Error: failed to start" << endl;
         exit(1);
     }
-    int r3 = pthread_create(&keypress_thread, NULL, &readKeypress, NULL);
+    pthread_create(&keypress_thread, NULL, &readKeypress, NULL);
 
-    pthread_join(server_recv_thread, NULL);
+    pthread_join(listen_thread, NULL);
     pthread_join(server_send_thread, NULL);
     pthread_join(keypress_thread, NULL);
+
+    cout << "n errors: " << n_errors << endl;
 
     exit(0);
 
