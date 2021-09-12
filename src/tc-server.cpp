@@ -116,16 +116,13 @@ void *serverRecv(void *client) {
             break;
         }
         if (messages.size() > 0) {
-
             pthread_mutex_lock(&message_mutex);
             for (int i = 0; i < messages.size(); i++) {
                 message_queue.push_back(messages[i]);
             }
             pthread_mutex_unlock(&message_mutex);
             pthread_cond_signal(&flush_messages);
-
         }
-
     }
 
     pthread_exit(NULL);
@@ -166,7 +163,6 @@ void *listenNewConnections(void*) {
         }
 
         recv_threads.push_back(recv_thread);
-
     }
 
     for (int i = 0; i < recv_threads.size(); i++) {
