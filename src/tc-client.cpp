@@ -51,10 +51,6 @@ void connect() {
     }
 }
 
-void disconnect() {
-    close(_socket);
-}
-
 void sendMessage(char* msg) {
     char* buf = new char[strlen(msg) + 2];
     buf[0] = '\x02';
@@ -62,7 +58,14 @@ void sendMessage(char* msg) {
         buf[i+1] = msg[i];
     }
     buf[strlen(msg)+1] = '\x03';
-    send(_socket, buf, strlen(buf), 0);
+    ssize_t n = send(_socket, buf, strlen(buf), MSG_CONFIRM | MSG_NOSIGNAL);
+    if (n < 0) {
+        stop = true;
+        shutdown(_socket, SHUT_RDWR);
+        close(_socket);
+        endwin();
+        cout << "disconnected" << endl;
+    }
 }
 
 bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n) {
@@ -84,12 +87,20 @@ void *recieveMessages(void*) {
     while (!stop) {
         vector<string> messages;
         char buffer[bufsize];
-        ssize_t n;
-        n = recv(_socket, buffer, bufsize, 0);
+        ssize_t n = recv(_socket, buffer, bufsize, 0);
+        if (n <= 0) {
+            break;
+        }
         bool finished = appendBuffer(messages, buffer, n);
         while (!finished && n > 0) {
             n = recv(_socket, buffer, bufsize, 0);
+            if (n <= 0) {
+                break;
+            }
             finished = appendBuffer(messages, buffer, n);
+        }
+        if (n <= 0) {
+            break;
         }
 
         if (messages.size() > 0) {
@@ -101,6 +112,13 @@ void *recieveMessages(void*) {
             wrefresh(win_in);
             messages.clear();
         }
+    }
+    if (!stop) {
+        stop = true;
+        shutdown(_socket, SHUT_RDWR);
+        close(_socket);
+        endwin();
+        cout << "disconnected" << endl;
     }
     pthread_exit(NULL);
 }
@@ -123,10 +141,10 @@ void buildWindow() {
     wborder(_win, 0, 0, 0, 0, 0, 0, 0, 0);
     win_out = derwin(_win, wh-input_lines-2, ww-2, 1, 1);
 
-
     WINDOW* _win_in = derwin(_win, input_lines, ww, wh-input_lines, 0);
     wborder(_win_in, 0, 0, 0, 0, ACS_LTEE, ACS_RTEE, 0, 0);
     win_in = derwin(_win_in, input_lines-2, ww-2, 1, 1);
+    wtimeout(win_in, 1000);
     wmove(win_in, 0, 0);
     wprintw(win_in, ">");
 
@@ -142,7 +160,7 @@ void *getInput(void*) {
     keypad(win_in, TRUE);
     int ch;
     string input = "";
-    while ((ch = wgetch(win_in)) != 27) {
+    while ((ch = wgetch(win_in)) != 27 && !stop) {
         if (ch == KEY_ENTER || ch == '\n') {
             if (input.length() > 0) {
                 sendMessage((char*)input.c_str());
@@ -166,10 +184,12 @@ void *getInput(void*) {
             // @TODO: scroll down
         }
     }
-    stop = true;
-    shutdown(_socket, SHUT_RD);
-    close(_socket);
-    endwin();
+    if (!stop) {
+        stop = true;
+        shutdown(_socket, SHUT_RDWR);
+        close(_socket);
+        endwin();
+    }
     pthread_exit(NULL);
 }
 

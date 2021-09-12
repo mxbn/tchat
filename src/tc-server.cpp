@@ -17,7 +17,6 @@ using namespace std;
 const int MAX_CONN = 1024;
 
 atomic<bool> stop (false);
-atomic<int> n_errors (1);
 
 int _socket;
 vector<int> clients;
@@ -102,19 +101,20 @@ void *serverRecv(void *client) {
         char buffer[bufsize];
         ssize_t n = recv(_client, buffer, bufsize, 0);
 
-        if (n == 0) {
-            continue;
-        }
-        if (n < 1) {
-            n_errors += 1;
-            continue;
+        if (n <= 0) {
+            break;
         }
         bool finished = appendBuffer(messages, buffer, n, true);
         while (!finished && n > 0 && !stop) {
             n = recv(_client, buffer, bufsize, 0);
+            if (n <= 0) {
+                break;
+            }
             finished = appendBuffer(messages, buffer, n, false);
         }
-
+        if (n <= 0) {
+            break;
+        }
         if (messages.size() > 0) {
 
             pthread_mutex_lock(&message_mutex);
@@ -186,8 +186,17 @@ void sendMessage(char const* msg) {
         buf[i+1] = msg[i];
     }
     buf[strlen(msg)+1] = '\x03';
+
+    vector<int> closed_clients;
     for (int i = 0; i < clients.size(); i++) {
-        send(clients[i], buf, strlen(buf), 0);
+        ssize_t n = send(clients[i], buf, strlen(buf), MSG_CONFIRM | MSG_NOSIGNAL);
+        if (n < 0) {
+            closed_clients.push_back(i);
+        }
+    }
+    for (int i = 0; i < closed_clients.size(); i++) {
+        close(clients[closed_clients[i]]);
+        clients.erase(clients.begin() + closed_clients[i]);
     }
 }
 
@@ -226,7 +235,7 @@ int main() {
     pthread_join(server_send_thread, NULL);
     pthread_join(keypress_thread, NULL);
 
-    cout << "n errors: " << n_errors << endl;
+    cout << "stopped" << endl;
 
     exit(0);
 
