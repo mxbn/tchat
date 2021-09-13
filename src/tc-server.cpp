@@ -10,6 +10,7 @@
 #include <atomic>
 #include <vector>
 #include <string>
+#include <chrono>
 
 
 using namespace std;
@@ -18,15 +19,26 @@ const int MAX_CONN = 1024;
 
 atomic<bool> stop (false);
 
-int _socket;
-vector<int> clients;
+int server_socket;
 int bufsize = 1024;
 int port = 5555;
 
 pthread_mutex_t message_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t flush_messages = PTHREAD_COND_INITIALIZER;
-vector<string> message_queue = {};
+
+struct client_struct {
+    int socket;
+    string user_name;
+};
+vector<client_struct> clients;
+
+struct message_struct {
+    string user_name;
+    int64_t timestamp;
+    string text;
+};
+vector<message_struct> message_queue;
 
 
 void *readKeypress(void*) {
@@ -42,19 +54,19 @@ void *readKeypress(void*) {
     stop = true;
     pthread_cond_signal(&flush_messages);
     for (int i = 0; i < clients.size(); i++) {
-        shutdown(clients[i], SHUT_RDWR);
-        close(clients[i]);
+        shutdown(clients[i].socket, SHUT_RDWR);
+        close(clients[i].socket);
     }
-    shutdown(_socket, SHUT_RDWR);
-    close(_socket);
+    shutdown(server_socket, SHUT_RDWR);
+    close(server_socket);
     pthread_exit(NULL);
 }
 
 void startServer() {
 
-    _socket = socket(AF_INET, SOCK_STREAM, 0);
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (_socket < 0) {
+    if (server_socket < 0) {
         cout << "Error: can't open a socket" << endl;
         exit(1);
     }
@@ -65,48 +77,48 @@ void startServer() {
     server_addr.sin_addr.s_addr = htons(INADDR_ANY);
     server_addr.sin_port = htons(port);
 
-    if ((bind(_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))) < 0) {
+    if ((bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))) < 0) {
         cout << "Error: error binding connection, is port already being used?" << endl;
         exit(1);
     }
 
-    listen(_socket, MAX_CONN);
+    listen(server_socket, MAX_CONN);
 
     cout << "Waiting for clients to connect..." << endl;
 
 }
 
-bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n, bool start) {
+bool appendBuffer(vector<string>& messages, char *buffer, ssize_t n, bool start) {
     bool finished = start;
     for (int i = 0; i < n; i++) {
-        if (buf[i] == '\x02') {
+        if (buffer[i] == '\x02') {
             finished = false;
-            msgs.push_back("");
-        } else if (buf[i] == '\x03') {
+            messages.push_back("");
+        } else if (buffer[i] == '\x03') {
             finished = true;
-        } else if (!finished && msgs.size() > 0) {
-            msgs[msgs.size()-1] += buf[i];
+        } else if (!finished && messages.size() > 0) {
+            messages[messages.size()-1] += buffer[i];
         }
     }
     return finished;
 }
 
-void *serverRecv(void *client) {
+void *serverRecv(void *c) {
 
-    int _client = *((int *)client);
+    client_struct client = *((client_struct *)c);
 
     while (!stop) {
 
         vector<string> messages;
         char buffer[bufsize];
-        ssize_t n = recv(_client, buffer, bufsize, 0);
+        ssize_t n = recv(client.socket, buffer, bufsize, 0);
 
         if (n <= 0) {
             break;
         }
         bool finished = appendBuffer(messages, buffer, n, true);
         while (!finished && n > 0 && !stop) {
-            n = recv(_client, buffer, bufsize, 0);
+            n = recv(client.socket, buffer, bufsize, 0);
             if (n <= 0) {
                 break;
             }
@@ -116,9 +128,11 @@ void *serverRecv(void *client) {
             break;
         }
         if (messages.size() > 0) {
+            int64_t ts = chrono::duration_cast<chrono::milliseconds>(chrono::system_clock::now().time_since_epoch()).count();
             pthread_mutex_lock(&message_mutex);
             for (int i = 0; i < messages.size(); i++) {
-                message_queue.push_back(messages[i]);
+                message_struct m = {client.user_name, ts, messages[i]};
+                message_queue.push_back(m);
             }
             pthread_mutex_unlock(&message_mutex);
             pthread_cond_signal(&flush_messages);
@@ -127,6 +141,26 @@ void *serverRecv(void *client) {
 
     pthread_exit(NULL);
 
+}
+
+string getUserName(int client_socket) {
+    string user_name;
+    char buffer[bufsize];
+    bool finished = false;
+    while (!finished) {
+        ssize_t n = recv(client_socket, buffer, bufsize, 0);
+        for (int i = 0; i < n; i++) {
+            if (buffer[i] == '\x02') {
+                continue;
+            } else if (buffer[i] == '\x03') {
+                finished = true;
+                break;
+            } else if (!finished) {
+                user_name += buffer[i];
+            }
+        }
+    }
+    return user_name;
 }
 
 void *listenNewConnections(void*) {
@@ -138,25 +172,26 @@ void *listenNewConnections(void*) {
         struct sockaddr_in client_addr;
         socklen_t size = sizeof(client_addr);
 
-        int client = accept(_socket, (struct sockaddr *)&client_addr, &size);
+        int client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &size);
 
-        if (client < 0 && stop) {
+        if (client_socket < 0 && stop) {
             break;
         }
 
-        if (client < 0) {
+        if (client_socket < 0) {
             cout << "Error: can't accept connections" << endl;
             exit(1);
         }
+
+        string user_name = getUserName(client_socket) + "@" + inet_ntoa(client_addr.sin_addr);
+        client_struct client = {client_socket, user_name};
 
         pthread_mutex_lock(&client_mutex);
         clients.push_back(client);
         pthread_mutex_unlock(&client_mutex);
 
-        cout << "Connected client IP address: " << inet_ntoa(client_addr.sin_addr) << endl;
-
         pthread_t recv_thread;
-        int r = pthread_create(&recv_thread, NULL, &serverRecv, &client);
+        int r = pthread_create(&recv_thread, NULL, &serverRecv, &clients[clients.size()-1]);
         if (r) {
             cout << endl << "Error: failed to connect a client" << endl;
             exit(1);
@@ -172,26 +207,30 @@ void *listenNewConnections(void*) {
     pthread_exit(NULL);
 }
 
-void sendMessage(char const* msg) {
+void sendMessage(message_struct message) {
+
     if (stop) {
         return;
     }
-    char* buf = new char[strlen(msg) + 2];
+    
+    string msg_text = message.user_name + ": " + message.text;
+
+    char* buf = new char[msg_text.length() + 2];
     buf[0] = '\x02';
-    for (int i = 0; i < strlen(msg) + 1; i++) {
-        buf[i+1] = msg[i];
+    for (int i = 0; i < msg_text.length() + 1; i++) {
+        buf[i+1] = msg_text[i];
     }
-    buf[strlen(msg)+1] = '\x03';
+    buf[msg_text.length()+1] = '\x03';
 
     vector<int> closed_clients;
     for (int i = 0; i < clients.size(); i++) {
-        ssize_t n = send(clients[i], buf, strlen(buf), MSG_CONFIRM | MSG_NOSIGNAL);
+        ssize_t n = send(clients[i].socket, buf, strlen(buf), MSG_CONFIRM | MSG_NOSIGNAL);
         if (n < 0) {
             closed_clients.push_back(i);
         }
     }
     for (int i = 0; i < closed_clients.size(); i++) {
-        close(clients[closed_clients[i]]);
+        close(clients[closed_clients[i]].socket);
         clients.erase(clients.begin() + closed_clients[i]);
     }
 }
@@ -199,7 +238,7 @@ void sendMessage(char const* msg) {
 void *serverSend(void*) {
     int n;
     while (!stop) {
-        vector<string> messages;
+        vector<message_struct> messages;
         pthread_cond_wait(&flush_messages, &message_mutex);
         n = message_queue.size();
         for (int i = 0; i < n; i++) {
@@ -208,7 +247,7 @@ void *serverSend(void*) {
         message_queue.clear();
         pthread_mutex_unlock(&message_mutex);
         for (int i = 0; i < n; i++) {
-            sendMessage(messages[i].c_str());
+            sendMessage(messages[i]);
         }
     }
     pthread_exit(NULL);
