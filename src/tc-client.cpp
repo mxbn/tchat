@@ -70,8 +70,8 @@ void connect(string user_name) {
     sendMessage(user_name.c_str());
 }
 
-bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n) {
-    bool finished = false;
+bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n, bool start) {
+    bool finished = start;
     for (int i = 0; i < n; i++) {
         if (buf[i] == '\x02') {
             finished = false;
@@ -93,13 +93,13 @@ void *recieveMessages(void*) {
         if (n <= 0) {
             break;
         }
-        bool finished = appendBuffer(messages, buffer, n);
+        bool finished = appendBuffer(messages, buffer, n, true);
         while (!finished && n > 0) {
             n = recv(server_socket, buffer, bufsize, 0);
             if (n <= 0) {
                 break;
             }
-            finished = appendBuffer(messages, buffer, n);
+            finished = appendBuffer(messages, buffer, n, false);
         }
         if (n <= 0) {
             break;

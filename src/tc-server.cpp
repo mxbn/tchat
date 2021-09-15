@@ -112,7 +112,6 @@ void *serverRecv(void *c) {
         vector<string> messages;
         char buffer[bufsize];
         ssize_t n = recv(client.socket, buffer, bufsize, 0);
-
         if (n <= 0) {
             break;
         }
@@ -214,17 +213,17 @@ void sendMessage(message_struct message) {
     }
 
     string msg_text = message.user_name + ": " + message.text;
-
-    char* buf = new char[msg_text.length() + 2];
+    int buf_len = msg_text.length() + 2;
+    char* buf = new char[buf_len];
     buf[0] = '\x02';
-    for (int i = 0; i < msg_text.length() + 1; i++) {
+    for (int i = 0; i < buf_len - 1; i++) {
         buf[i+1] = msg_text[i];
     }
-    buf[msg_text.length()+1] = '\x03';
+    buf[buf_len-1] = '\x03';
 
     vector<int> closed_clients;
     for (int i = 0; i < clients.size(); i++) {
-        ssize_t n = send(clients[i].socket, buf, strlen(buf), MSG_CONFIRM | MSG_NOSIGNAL);
+        ssize_t n = send(clients[i].socket, buf, buf_len, MSG_CONFIRM | MSG_NOSIGNAL);
         if (n < 0) {
             closed_clients.push_back(i);
         }
