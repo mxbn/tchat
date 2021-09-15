@@ -212,7 +212,7 @@ void sendMessage(message_struct message) {
     if (stop) {
         return;
     }
-    
+
     string msg_text = message.user_name + ": " + message.text;
 
     char* buf = new char[msg_text.length() + 2];
@@ -229,9 +229,13 @@ void sendMessage(message_struct message) {
             closed_clients.push_back(i);
         }
     }
-    for (int i = 0; i < closed_clients.size(); i++) {
-        close(clients[closed_clients[i]].socket);
-        clients.erase(clients.begin() + closed_clients[i]);
+    if (closed_clients.size() > 0) {
+        pthread_mutex_lock(&client_mutex);
+        for (int i = 0; i < closed_clients.size(); i++) {
+            close(clients[closed_clients[i]].socket);
+            clients.erase(clients.begin() + closed_clients[i]);
+        }
+        pthread_mutex_unlock(&client_mutex);
     }
 }
 
