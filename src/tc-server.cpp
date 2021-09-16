@@ -38,7 +38,7 @@ struct message_struct {
     int64_t timestamp;
     string text;
 };
-vector<message_struct> message_queue;
+vector<message_struct> message_history;
 
 
 void *readKeypress(void*) {
@@ -88,7 +88,7 @@ void startServer() {
 
 }
 
-bool appendBuffer(vector<string>& messages, char *buffer, ssize_t n, bool start) {
+bool parseBuffer(vector<string>& messages, char *buffer, ssize_t n, bool start) {
     bool finished = start;
     for (int i = 0; i < n; i++) {
         if (buffer[i] == '\x02') {
@@ -115,13 +115,13 @@ void *serverRecv(void *c) {
         if (n <= 0) {
             break;
         }
-        bool finished = appendBuffer(messages, buffer, n, true);
+        bool finished = parseBuffer(messages, buffer, n, true);
         while (!finished && n > 0 && !stop) {
             n = recv(client.socket, buffer, bufsize, 0);
             if (n <= 0) {
                 break;
             }
-            finished = appendBuffer(messages, buffer, n, false);
+            finished = parseBuffer(messages, buffer, n, false);
         }
         if (n <= 0) {
             break;
@@ -131,7 +131,7 @@ void *serverRecv(void *c) {
             pthread_mutex_lock(&message_mutex);
             for (int i = 0; i < messages.size(); i++) {
                 message_struct m = {client.user_name, ts, messages[i]};
-                message_queue.push_back(m);
+                message_history.push_back(m);
             }
             pthread_mutex_unlock(&message_mutex);
             pthread_cond_signal(&flush_messages);
@@ -239,19 +239,18 @@ void sendMessage(message_struct message) {
 }
 
 void *serverSend(void*) {
-    int n;
+    int last_sent = 0;
     while (!stop) {
         vector<message_struct> messages;
         pthread_cond_wait(&flush_messages, &message_mutex);
-        n = message_queue.size();
-        for (int i = 0; i < n; i++) {
-            messages.push_back(message_queue[i]);
+        for (int i = last_sent; i < message_history.size(); i++) {
+            messages.push_back(message_history[i]);
         }
-        message_queue.clear();
         pthread_mutex_unlock(&message_mutex);
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < messages.size(); i++) {
             sendMessage(messages[i]);
         }
+        last_sent += messages.size();
     }
     pthread_exit(NULL);
 }

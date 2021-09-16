@@ -28,6 +28,8 @@ const char* ip = "0";
 WINDOW* win_in;
 WINDOW* win_out;
 
+vector<string> message_history;
+
 
 void sendMessage(const char* msg) {
     char* buf = new char[strlen(msg) + 2];
@@ -70,56 +72,56 @@ void connect(string user_name) {
     sendMessage(user_name.c_str());
 }
 
-bool appendBuffer(vector<string>& msgs, char *buf, ssize_t n, bool start) {
+bool parseBuffer(char *buf, ssize_t n, bool start) {
     bool finished = start;
     for (int i = 0; i < n; i++) {
         if (buf[i] == '\x02') {
             finished = false;
-            msgs.push_back("");
+            message_history.push_back("");
         } else if (buf[i] == '\x03') {
             finished = true;
-        } else if (!finished && msgs.size() > 0) {
-            msgs[msgs.size()-1] += buf[i];
+        } else if (!finished) {
+            message_history[message_history.size()-1] += buf[i];
         }
     }
     return finished;
 }
 
+void printMessages(int last_printed) {
+    for (int i = last_printed; i < message_history.size(); i++) {
+        int split_name_text = message_history[i].find(":");
+        string user_name = message_history[i].substr(0, split_name_text);
+        string msg_text = message_history[i].substr(split_name_text+1);
+        wattron(win_out, A_DIM);
+        wprintw(win_out, "\n%s:", user_name.c_str());
+        wattroff(win_out, A_DIM);
+        wprintw(win_out, "%s", msg_text.c_str());
+    }
+    wrefresh(win_out);
+    wprintw(win_in, "");
+    wrefresh(win_in);
+}
+
 void *recieveMessages(void*) {
     while (!stop) {
-        vector<string> messages;
+        int last_printed = message_history.size();
         char buffer[bufsize];
         ssize_t n = recv(server_socket, buffer, bufsize, 0);
         if (n <= 0) {
             break;
         }
-        bool finished = appendBuffer(messages, buffer, n, true);
+        bool finished = parseBuffer(buffer, n, true);
         while (!finished && n > 0) {
             n = recv(server_socket, buffer, bufsize, 0);
             if (n <= 0) {
                 break;
             }
-            finished = appendBuffer(messages, buffer, n, false);
+            finished = parseBuffer(buffer, n, false);
         }
         if (n <= 0) {
             break;
         }
-
-        if (messages.size() > 0) {
-            for (int i = 0; i < messages.size(); i++) {
-                int split_name_text = messages[i].find(":");
-                string user_name = messages[i].substr(0, split_name_text);
-                string msg_text = messages[i].substr(split_name_text+1);
-                wattron(win_out, A_DIM);
-                wprintw(win_out, "\n%s:", user_name.c_str());
-                wattroff(win_out, A_DIM);
-                wprintw(win_out, "%s", msg_text.c_str());
-            }
-            wrefresh(win_out);
-            wprintw(win_in, "");
-            wrefresh(win_in);
-            messages.clear();
-        }
+        printMessages(last_printed);
     }
     if (!stop) {
         stop = true;
@@ -141,7 +143,7 @@ void buildWindow() {
     int wy = 0;
     int ww = sw - 2*wx;
     int wh = sh - 2*wy;
-    int input_lines = wh/4 >= 3 ? wh/4 : 3;
+    int input_lines = wh/4 >= 3 ? (wh/4 > 7 ? 7 : wh/4) : 3;
 
     WINDOW* _win = newwin(wh, ww, wy, wx);
     wborder(_win, 0, 0, 0, 0, 0, 0, 0, 0);
@@ -158,9 +160,9 @@ void buildWindow() {
 
     refresh();
     wrefresh(_win);
-    wrefresh(win_out);
     wrefresh(_win_in);
-    wrefresh(win_in);
+
+    printMessages(0);
 }
 
 void *getInput(void*) {
@@ -192,6 +194,7 @@ void *getInput(void*) {
             // @TODO: scroll down
         } else if (ch == KEY_RESIZE) {
             buildWindow();
+            wprintw(win_in, input.c_str());
         }
     }
     if (!stop) {
