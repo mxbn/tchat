@@ -70,6 +70,7 @@ void connect(string user_name) {
     }
 
     sendMessage(user_name.c_str());
+    sendMessage("-1"); // load all message history
 }
 
 bool parseBuffer(char *buf, ssize_t n, bool start) {

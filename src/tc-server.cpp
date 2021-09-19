@@ -142,29 +142,41 @@ void *serverRecv(void *c) {
 
 }
 
-string getUserName(int client_socket) {
-    string user_name;
+void recvHeader(int client_socket, string& user_name, int& last_message_seen) {
     char buffer[bufsize];
-    bool finished = false;
-    while (!finished) {
+    int n_messages = 2;
+    int counter = 0;
+    bool inbetween = false;
+    string lms;
+    while (!(counter == n_messages && !inbetween)) {
         ssize_t n = recv(client_socket, buffer, bufsize, 0);
         for (int i = 0; i < n; i++) {
             if (buffer[i] == '\x02') {
-                continue;
+                inbetween = true;
             } else if (buffer[i] == '\x03') {
-                finished = true;
-                break;
-            } else if (!finished) {
-                user_name += buffer[i];
+                inbetween = false;
+                counter++;
+            } else if (inbetween) {
+                switch (counter) {
+                    case 0:
+                        user_name += buffer[i];
+                        break;
+                    case 1:
+                        lms += buffer[i];
+                        break;
+                }
             }
         }
     }
-    return user_name;
+    try {
+        last_message_seen = stoi(lms);
+    } catch (exception const & e) {
+        // can't parse int
+    }
 }
 
-void sendMessagesToOne(int start, client_struct client) {
-    pthread_mutex_lock(&message_mutex);
-    for (int i = start; i < message_history.size(); i++) {
+void sendMessagesToOne(int last_message_seen, client_struct client) {
+    for (int i = last_message_seen + 1; i < message_history.size(); i++) {
         string msg_text = message_history[i].user_name + ": " + message_history[i].text;
         int buf_len = msg_text.length() + 2;
         char* buf = new char[buf_len];
@@ -178,7 +190,6 @@ void sendMessagesToOne(int start, client_struct client) {
             break;
         }
     }
-    pthread_mutex_unlock(&message_mutex);
 }
 
 void *listenNewConnections(void*) {
@@ -201,13 +212,18 @@ void *listenNewConnections(void*) {
             exit(1);
         }
 
-        string user_name = getUserName(client_socket) + "@" + inet_ntoa(client_addr.sin_addr);
+        string name;
+        int last_message_seen = 0;
+        recvHeader(client_socket, name, last_message_seen);
+
+        string user_name = name + "@" + inet_ntoa(client_addr.sin_addr);
         client_struct client = {client_socket, user_name};
 
-        sendMessagesToOne(0, client);
-
+        pthread_mutex_lock(&message_mutex);
         pthread_mutex_lock(&client_mutex);
+        sendMessagesToOne(last_message_seen, client);
         clients.push_back(client);
+        pthread_mutex_unlock(&message_mutex);
         pthread_mutex_unlock(&client_mutex);
 
         pthread_t recv_thread;
