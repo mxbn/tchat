@@ -162,6 +162,25 @@ string getUserName(int client_socket) {
     return user_name;
 }
 
+void sendMessagesToOne(int start, client_struct client) {
+    pthread_mutex_lock(&message_mutex);
+    for (int i = start; i < message_history.size(); i++) {
+        string msg_text = message_history[i].user_name + ": " + message_history[i].text;
+        int buf_len = msg_text.length() + 2;
+        char* buf = new char[buf_len];
+        buf[0] = '\x02';
+        for (int i = 0; i < buf_len - 1; i++) {
+            buf[i+1] = msg_text[i];
+        }
+        buf[buf_len-1] = '\x03';
+        ssize_t n = send(client.socket, buf, buf_len, MSG_CONFIRM | MSG_NOSIGNAL);
+        if (n < 0) {
+            break;
+        }
+    }
+    pthread_mutex_unlock(&message_mutex);
+}
+
 void *listenNewConnections(void*) {
 
     vector<pthread_t> recv_threads;
@@ -185,6 +204,8 @@ void *listenNewConnections(void*) {
         string user_name = getUserName(client_socket) + "@" + inet_ntoa(client_addr.sin_addr);
         client_struct client = {client_socket, user_name};
 
+        sendMessagesToOne(0, client);
+
         pthread_mutex_lock(&client_mutex);
         clients.push_back(client);
         pthread_mutex_unlock(&client_mutex);
@@ -206,7 +227,7 @@ void *listenNewConnections(void*) {
     pthread_exit(NULL);
 }
 
-void sendMessage(message_struct message) {
+void sendMessageToAll(message_struct message) {
 
     if (stop) {
         return;
@@ -248,7 +269,7 @@ void *serverSend(void*) {
         }
         pthread_mutex_unlock(&message_mutex);
         for (int i = 0; i < messages.size(); i++) {
-            sendMessage(messages[i]);
+            sendMessageToAll(messages[i]);
         }
         last_sent += messages.size();
     }
