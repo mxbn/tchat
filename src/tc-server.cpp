@@ -175,9 +175,15 @@ void recvHeader(int client_socket, string& user_name, int& last_message_seen) {
     }
 }
 
-void sendMessagesToOne(int last_message_seen, client_struct client) {
+void sendMessagesToOne(int& last_message_seen, client_struct client) {
+    vector<message_struct> messages;
+    pthread_mutex_lock(&message_mutex);
     for (int i = last_message_seen + 1; i < message_history.size(); i++) {
-        string msg_text = message_history[i].user_name + ": " + message_history[i].text;
+        messages.push_back(message_history[i]);
+    }
+    pthread_mutex_unlock(&message_mutex);
+    for (int i = 0; i < messages.size(); i++) {
+        string msg_text = messages[i].user_name + ": " + messages[i].text;
         int buf_len = msg_text.length() + 2;
         char* buf = new char[buf_len];
         buf[0] = '\x02';
@@ -190,6 +196,7 @@ void sendMessagesToOne(int last_message_seen, client_struct client) {
             break;
         }
     }
+    last_message_seen += messages.size();
 }
 
 void *listenNewConnections(void*) {
@@ -219,11 +226,14 @@ void *listenNewConnections(void*) {
         string user_name = name + "@" + inet_ntoa(client_addr.sin_addr);
         client_struct client = {client_socket, user_name};
 
-        pthread_mutex_lock(&message_mutex);
+        // send the bulk of the history without blocking other clients
+        sendMessagesToOne(last_message_seen, client);
+
+        // block all clients until new client is included
         pthread_mutex_lock(&client_mutex);
+        // send again if new messages received during previous bulk send
         sendMessagesToOne(last_message_seen, client);
         clients.push_back(client);
-        pthread_mutex_unlock(&message_mutex);
         pthread_mutex_unlock(&client_mutex);
 
         pthread_t recv_thread;
@@ -258,6 +268,7 @@ void sendMessageToAll(message_struct message) {
     }
     buf[buf_len-1] = '\x03';
 
+    pthread_mutex_lock(&client_mutex);
     vector<int> closed_clients;
     for (int i = 0; i < clients.size(); i++) {
         ssize_t n = send(clients[i].socket, buf, buf_len, MSG_CONFIRM | MSG_NOSIGNAL);
@@ -266,13 +277,12 @@ void sendMessageToAll(message_struct message) {
         }
     }
     if (closed_clients.size() > 0) {
-        pthread_mutex_lock(&client_mutex);
         for (int i = 0; i < closed_clients.size(); i++) {
             close(clients[closed_clients[i]].socket);
             clients.erase(clients.begin() + closed_clients[i]);
         }
-        pthread_mutex_unlock(&client_mutex);
     }
+    pthread_mutex_unlock(&client_mutex);
 }
 
 void *serverSend(void*) {
